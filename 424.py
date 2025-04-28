@@ -8,54 +8,58 @@ import torch.optim as optim
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.model_selection import train_test_split
 from matminer.featurizers.composition import ElementProperty
 from matminer.featurizers.conversions import StrToComposition
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from scipy.stats import spearmanr, pearsonr
 
+
 # ========= 模块1：准备化学式数据并提取特征 =========
 def prepare_multi_system_inputs():
-    # 定义化学系统的基本化学式列表
+    """准备化学式数据并提取特征"""
     system_bases = [
         'Li26Ni27FeO54', 'Li25Ni27Fe2O54', 'Li24Ni27Fe3O54', 'Li23Ni27Fe4O54', 'Li22Ni27Fe5O53',
         'Li26Ni27O54', 'Li27Ni27O54', 'Li27Ni27O53', 'Li27Ni27O52', 'Li25Ni27CoMnO54',
         'Li26Ni27CoO54', 'Li25Ni27Co2O54', 'Li24Ni27Co3O54', 'Li23Ni27Co4O54', 'Li22Ni27Co5O53',
         'Li26Ni27MnO54', 'Li25Ni27Mn2O54', 'Li24Ni27Mn3O54', 'Li23Ni27Mn4O54', 'Li22Ni27Mn5O53',
-        'Li26Ni27AlO54', 'Li25Ni27Al2O54', 'Li24Ni27Al3O54', 'Li23Ni27Al4O54', 'Li22Ni27Al5O53'
+        'Li26Ni27AlO54', 'Li25Ni27Al2O54', 'Li24Ni27Al3O54', 'Li23Ni27Al4O54', 'Li22Ni27Al5O53',
+        # 假设你有50个真实样本，继续补充列表
     ]
-    # 使用matminer中的ElementProperty提取化学成分特征
     featurizer = ElementProperty.from_preset("magpie", impute_nan=True)
-    X_all, y_all = [], []  # 存储特征和目标值
+    X_all, y_all = [], []
 
-    # 遍历每个化学式
     for formula in system_bases:
         try:
-            # 使用StrToComposition将化学式转换为组成对象
+            # 将化学式转换为化学成分
             df = pd.DataFrame({'formula': [formula]})
             df = StrToComposition().featurize_dataframe(df, col_id='formula', ignore_errors=True)
-            # 使用ElementProperty提取化学成分特征
+            # 提取化学成分特征
             df = featurizer.featurize_dataframe(df, col_id='composition', ignore_errors=True)
-            # 获取提取的特征
+            # 获取特征值
             features = df.drop(columns=['formula', 'composition']).values[0]
             X_all.append(features)
-            # 人工生成目标值（这里只是示例，可以根据实际需要调整）
+            # 模拟标签：基于当前样本的索引生成一个标签
             y_all.append(0.4 + 0.01 * len(y_all))
-        except Exception:
+        except Exception as e:
+            # 发生错误时打印出错化学式
+            print(f"❌ 处理化学式 {formula} 时发生错误: {e}")
             continue
 
-    # 将所有样本的特征合并成一个numpy数组
+    # 将所有特征数据和标签合并为 numpy 数组
     X_merged = np.array(X_all)
     y_merged = np.array(y_all)
-    print("📊 特征分布统计信息：")
-    print(pd.DataFrame(X_merged).describe())  # 输出特征的统计信息
+    print("\U0001F4CA 特征分布统计信息：")
+    print(pd.DataFrame(X_merged).describe())
 
     return X_merged, y_merged
 
 
 # ========= 模块2：标准化数据 =========
 def standardize_and_align(X_raw, y_array):
-    # 使用StandardScaler进行数据标准化
+    """标准化特征"""
+    # 使用StandardScaler对特征进行标准化，使其均值为0，标准差为1
     scaler = StandardScaler().fit(X_raw)
     X_scaled = scaler.transform(X_raw)
     return X_scaled, y_array, X_raw.shape[1], scaler
@@ -63,9 +67,10 @@ def standardize_and_align(X_raw, y_array):
 
 # ========= 模块3：自定义数据集结构 =========
 class MultiSystemDataset(Dataset):
+    """PyTorch数据集封装"""
     def __init__(self, X, y):
-        self.X = X  # 特征
-        self.y = y  # 目标值
+        self.X = X
+        self.y = y
 
     def __len__(self):
         return len(self.y)
@@ -76,142 +81,224 @@ class MultiSystemDataset(Dataset):
 
 # ========= 模块4：定义神经网络结构 =========
 class BatteryModel(nn.Module):
-    def __init__(self, input_dim):
+    """简单MLP回归模型"""
+    def __init__(self, input_dim, hidden_units=64):
         super(BatteryModel, self).__init__()
-        # 定义一个简单的全连接神经网络结构
+        # 定义一个简单的全连接神经网络（MLP）
         self.fc = nn.Sequential(
-            nn.Linear(input_dim, 256),  # 输入层到隐藏层
-            nn.ReLU(),                  # 激活函数
-            nn.Dropout(0.1),             # Dropout正则化
-            nn.Linear(256, 128),         # 隐藏层到隐藏层
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(128, 1)            # 隐藏层到输出层
+            nn.Linear(input_dim, hidden_units),  # 输入层到隐藏层
+            nn.ReLU(),  # 激活函数
+            nn.Linear(hidden_units, hidden_units),  # 第二个隐藏层
+            nn.ReLU(),  # 激活函数
+            nn.Linear(hidden_units, 1)  # 输出层
         )
 
     def forward(self, x):
         return self.fc(x)
 
 
+# ========= 模块5：数据扩充函数 =========
+def augment_with_noise(X, y, target_size=100, noise_level_X=0.01, noise_level_y=0.005):
+    """扩充数据到指定数量（强制设置为100），并添加小幅噪声"""
+    X_aug, y_aug = [X.copy()], [y.copy()]
+    rng = np.random.default_rng()
+
+    # 计算当前数据集的大小
+    current_size = X.shape[0]
+
+    # 如果当前数据量小于目标数量，持续扩充数据
+    while len(X_aug) * current_size < target_size:
+        noise_X = rng.normal(0, noise_level_X, X.shape)  # 对特征添加噪声
+        noise_y = rng.normal(0, noise_level_y, y.shape)  # 对标签添加噪声
+        X_new = X + noise_X
+        y_new = y + noise_y
+        X_aug.append(X_new)
+        y_aug.append(y_new)
+
+    # 最终数据集大小设置为目标大小
+    X_final = np.vstack(X_aug)[:target_size]
+    y_final = np.hstack(y_aug)[:target_size]
+    return X_final, y_final
+
+
 # ========= 主程序入口 =========
 if __name__ == '__main__':
-    os.makedirs("training_output", exist_ok=True)  # 创建训练输出目录
-    os.makedirs("prediction_output", exist_ok=True)  # 创建预测输出目录
-    os.makedirs("saved_model", exist_ok=True)  # 创建保存模型的目录
-    shap.initjs()  # 初始化SHAP库
+    # 创建输出文件夹
+    os.makedirs("training_output", exist_ok=True)
+    os.makedirs("prediction_output", exist_ok=True)
+    os.makedirs("saved_model", exist_ok=True)
 
-    # ===== 步骤1：数据准备 =====
-    X_raw, y = prepare_multi_system_inputs()  # 准备特征和目标值
-    X_scaled, y, input_dim, scaler = standardize_and_align(X_raw, y)  # 数据标准化
-    dataset = MultiSystemDataset(X_scaled, y)  # 创建自定义数据集
+    shap.initjs()  # 启用SHAP可视化工具
 
-    # 划分训练集和验证集
-    train_size = max(1, int(0.4 * len(dataset)))  # 训练集大小
-    val_size = max(1, len(dataset) - train_size)  # 验证集大小
-    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])  # 随机拆分数据集
-    train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True)  # 训练数据加载器
-    val_loader = DataLoader(val_dataset, batch_size=8)  # 验证数据加载器
+    # 原始数据准备
+    X_raw, y_raw = prepare_multi_system_inputs()
+    X_scaled, y, input_dim, scaler = standardize_and_align(X_raw, y_raw)
 
-    # ===== 步骤2：构建模型 =====
-    model = BatteryModel(input_dim)  # 创建模型
-    optimizer = optim.Adam(model.parameters(), lr=0.001)  # 使用Adam优化器
-    loss_fn = nn.MSELoss()  # 定义损失函数
+    # 第一步：划分15%的原始数据作为测试集
+    X_trainval_raw, X_test_raw, y_trainval_raw, y_test_raw = train_test_split(X_scaled,
+                                                                              y, test_size=0.15, random_state=42)
 
-    # ===== 步骤3：训练模型 =====
-    train_losses, val_losses = [], []  # 存储训练损失和验证损失
-    for epoch in range(50):  # 训练50轮
-        model.train()  # 设置为训练模式
-        total_loss = 0
-        # 训练阶段
-        for X_batch, y_batch in tqdm(train_loader, desc=f"Epoch {epoch + 1}/50"):
-            optimizer.zero_grad()  # 清零梯度
-            pred = model(X_batch)  # 模型预测
-            loss = loss_fn(pred, y_batch.view(-1, 1))  # 计算损失
-            loss.backward()  # 反向传播
-            optimizer.step()  # 更新参数
-            total_loss += loss.item()  # 累加损失
-        train_losses.append(total_loss / len(train_loader))  # 记录平均训练损失
+    # 第二步：扩充训练集到100个样本
+    X_trainval_aug, y_trainval_aug = augment_with_noise(X_trainval_raw, y_trainval_raw, target_size=100)
 
-        # 验证阶段
-        model.eval()  # 设置为评估模式
-        val_loss, preds, trues = 0, [], []
-        with torch.no_grad():  # 不计算梯度
-            for X_batch, y_batch in val_loader:
-                pred = model(X_batch)  # 模型预测
-                val_loss += loss_fn(pred, y_batch.view(-1, 1)).item()  # 计算验证损失
-                preds.append(pred)
-                trues.append(y_batch)
-        val_losses.append(val_loss / len(val_loader))  # 记录平均验证损失
+    # 记录每折的评估指标
+    all_metrics = {
+        'mse': [],
+        'mae': [],
+        'r2': [],
+        'spearman': [],
+        'pearson': []
+    }
 
-        # 计算R²评分
-        r2 = r2_score(torch.cat(trues).numpy(), torch.cat(preds).numpy())
-        print(f"✅ Epoch {epoch + 1}: Train Loss={train_losses[-1]:.4f}, Val Loss={val_losses[-1]:.4f}, R²={r2:.4f}")
+    # 进行10次交叉验证
+    for fold in range(1, 11):
+        print(f"\n🚀 开始第 {fold}/10 次交叉验证")
 
-    # ===== 步骤4：绘制训练损失曲线 =====
+        # 从扩充的训练集中划分验证集
+        X_train, X_val, y_train, y_val = train_test_split(X_trainval_aug, y_trainval_aug, test_size=0.15, random_state=fold*10)
+
+        # 创建数据集和数据加载器
+        train_dataset = MultiSystemDataset(X_train, y_train)
+        val_dataset = MultiSystemDataset(X_val, y_val)
+        test_dataset = MultiSystemDataset(X_test_raw, y_test_raw)  # 测试集一直是真实原始数据！
+
+        train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=8)
+        test_loader = DataLoader(test_dataset, batch_size=8)
+
+        # 定义模型、优化器和损失函数
+        model = BatteryModel(input_dim, hidden_units=64)
+        optimizer = optim.Adam(model.parameters(), lr=0.001)
+        loss_fn = nn.MSELoss()
+
+        best_val_loss = float('inf')  # 初始最优验证损失
+        train_losses, val_losses = [], []  # 存储训练和验证损失
+
+        for epoch in range(100):
+            model.train()
+            total_loss = 0
+            for X_batch, y_batch in train_loader:
+                optimizer.zero_grad()
+                pred = model(X_batch)
+                loss = loss_fn(pred, y_batch.view(-1, 1))  # 计算损失
+                loss.backward()  # 反向传播
+                optimizer.step()  # 优化步骤
+                total_loss += loss.item()
+
+            train_losses.append(total_loss / len(train_loader))  # 记录训练损失
+
+            # 验证损失
+            model.eval()
+            val_loss = 0
+            preds, trues = [], []
+            with torch.no_grad():
+                for X_batch, y_batch in val_loader:
+                    pred = model(X_batch)
+                    val_loss += loss_fn(pred, y_batch.view(-1, 1)).item()
+                    preds.append(pred)
+                    trues.append(y_batch)
+
+            avg_val_loss = val_loss / len(val_loader)
+            val_losses.append(avg_val_loss)  # 记录验证损失
+
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss  # 更新最优验证损失
+
+        # 保存每折的模型
+        torch.save(model.state_dict(), f'saved_model/model_fold_{fold}.pt')
+
+        # 测试评估
+        model.eval()
+        X_test_tensor = torch.tensor(X_test_raw, dtype=torch.float32)
+        y_test_tensor = torch.tensor(y_test_raw, dtype=torch.float32).view(-1, 1)
+        with torch.no_grad():
+            y_pred = model(X_test_tensor).numpy()
+
+        # 绘制训练和验证损失曲线
+        plt.figure()
+        plt.plot(train_losses, label="Training Loss", color='blue')
+        plt.plot(val_losses, label="Validation Loss", color='orange')
+        plt.xlabel("Epoch")
+        plt.ylabel("Loss")
+        plt.title("Training and Validation Loss Curve")
+        plt.legend()
+        plt.grid(True)
+        plt.savefig("training_output/loss_curve_pytorch.png")
+        plt.close()
+
+        # 计算评估指标
+        y_true = y_test_tensor.numpy()
+        mse = mean_squared_error(y_true, y_pred)
+        mae = mean_absolute_error(y_true, y_pred)
+        r2 = r2_score(y_true, y_pred)
+        spearman_corr, _ = spearmanr(y_true, y_pred)
+        pearson_corr, _ = pearsonr(y_true.flatten(), y_pred.flatten())
+        residuals = y_pred.flatten() - y_true.flatten()
+
+        # 预测值 vs 真实值折线图
+        plt.figure()
+        plt.plot(y_true, label="True Values", marker='o', color='blue')
+        plt.plot(y_pred, label="Predicted Values", marker='x', color='red')
+        plt.title("Predicted vs True Values (Test Set)")
+        plt.xlabel("Sample Index")
+        plt.ylabel("Target Value")
+        plt.legend()
+        plt.grid(True)
+        plt.savefig("prediction_output/prediction_vs_true_test.png")
+        plt.close()
+
+        # 残差图
+        plt.figure()
+        plt.scatter(y_true, residuals, color='green', label="Residual Points")
+        plt.axhline(0, color='red', linestyle='--', label="Zero Residual")
+        plt.xlabel("True Values")
+        plt.ylabel("Residuals (Predicted - True)")
+        plt.title("Residual Plot (Test Set)")
+        plt.grid(True)
+        plt.legend()
+        plt.savefig("prediction_output/residual_plot_test.png")
+        plt.close()
+
+        # 残差直方图
+        plt.figure()
+        plt.hist(residuals, bins=10, color='orange', edgecolor='black')
+        plt.title("Prediction Error Histogram (Test Set)")
+        plt.xlabel("Error Value")
+        plt.ylabel("Frequency")
+        plt.grid(True)
+        plt.savefig("prediction_output/error_histogram_test.png")
+        plt.close()
+
+        # 存储各折的评估指标
+        all_metrics['mse'].append(mse)
+        all_metrics['mae'].append(mae)
+        all_metrics['r2'].append(r2)
+        all_metrics['spearman'].append(spearman_corr)
+        all_metrics['pearson'].append(pearson_corr)
+
+        print(f"✅ Fold {fold}: MSE={mse:.4f}, MAE={mae:.4f}, R²={r2:.4f}, Spearman={spearman_corr:.4f},"
+              f" Pearson={pearson_corr:.4f}")
+
+    # 汇总10次交叉验证的结果
+    print("\n📊 交叉验证10次结果统计：")
+    with open("prediction_output/crossval_metrics_summary.txt", "w") as f:
+        for metric_name in all_metrics.keys():
+            mean_val = np.mean(all_metrics[metric_name])
+            std_val = np.std(all_metrics[metric_name])
+            result_line = f"{metric_name.upper()}: Mean={mean_val:.4f}, Std={std_val:.4f}"
+            print(result_line)
+            f.write(result_line + "\n")
+
+    # 绘制R²分数分布箱线图
     plt.figure()
-    plt.plot(train_losses, label="Training Loss", color='blue')  # 训练损失曲线
-    plt.plot(val_losses, label="Validation Loss", color='orange')  # 验证损失曲线
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.title("Training and Validation Loss Curve")
-    plt.legend()
+    plt.boxplot(all_metrics['r2'], patch_artist=True, labels=['R²'])
+    plt.title('R² Score Distribution Across 10 Folds')
+    plt.ylabel('R² Score')
     plt.grid(True)
-    plt.savefig("training_output/loss_curve_pytorch.png")  # 保存损失曲线图像
+    plt.savefig("prediction_output/r2_score_boxplot.png")
     plt.close()
 
-    # ===== 步骤5：模型评估与图形生成 =====
-    X_test = torch.tensor(X_scaled[:10], dtype=torch.float32)  # 测试数据
-    y_test = torch.tensor(y[:10], dtype=torch.float32).view(-1, 1)  # 测试标签
-    model.eval()
-    with torch.no_grad():  # 不计算梯度
-        y_pred = model(X_test).numpy()  # 预测结果
-
-    y_true = y_test.numpy()
-    residuals = y_pred.flatten() - y_true.flatten()  # 计算残差
-
-    # 📈 预测值 vs 真实值（折线图）
-    plt.figure()
-    plt.plot(y_true, label="True Values", marker='o', color='blue')  # 真实值
-    plt.plot(y_pred, label="Predicted Values", marker='x', color='red')  # 预测值
-    plt.title("Predicted vs True Values (Line Plot)")
-    plt.xlabel("Sample Index")
-    plt.ylabel("Target Value")
-    plt.legend()
-    plt.grid(True)
-    plt.savefig("prediction_output/prediction_vs_true.png")  # 保存预测值与真实值的折线图
-    plt.close()
-
-    # 📉 残差图
-    plt.figure()
-    plt.scatter(y_true, residuals, color='green', label="Residual Points")  # 残差点
-    plt.axhline(0, color='red', linestyle='--', label="Zero Residual")  # 0残差线
-    plt.xlabel("True Values")
-    plt.ylabel("Residuals (Predicted - True)")
-    plt.title("Residual Plot")
-    plt.grid(True)
-    plt.legend()
-    plt.savefig("prediction_output/residual_plot.png")  # 保存残差图
-    plt.close()
-
-    # 📊 残差直方图
-    plt.figure()
-    plt.hist(residuals, bins=10, color='orange', edgecolor='black')  # 残差直方图
-    plt.title("Prediction Error Histogram")
-    plt.xlabel("Error Value")
-    plt.ylabel("Frequency")
-    plt.grid(True)
-    plt.savefig("prediction_output/error_histogram.png")  # 保存残差直方图
-    plt.close()
-
-    # 📄 保存评估指标
-    mse = mean_squared_error(y_true, y_pred)  # 计算均方误差
-    mae = mean_absolute_error(y_true, y_pred)  # 计算平均绝对误差
-    r2 = r2_score(y_true, y_pred)  # 计算R²得分
-    spearman_corr, _ = spearmanr(y_true, y_pred)  # 计算Spearman相关系数
-    pearson_corr, _ = pearsonr(y_true.flatten(), y_pred.flatten())  # 计算Pearson相关系数
-    with open("prediction_output/evaluation_metrics.txt", "w") as f:
-        f.write(f"MSE: {mse:.4f}\nMAE: {mae:.4f}\nR²: {r2:.4f}\n")
-        f.write(f"Spearman: {spearman_corr:.4f}\nPearson: {pearson_corr:.4f}\n")  # 保存评估指标
+    print("\n✅ 全部完成，交叉验证指标和图表已保存！")
 
     # ===== 步骤7：保存模型参数 =====
     torch.save(model.state_dict(), "saved_model/battery_model.pth")  # 保存模型参数
